@@ -107,7 +107,9 @@
     if (restoreButton) restoreButton.focus({ preventScroll: true });
     else if (window.innerWidth <= 1000 && diagramContainer) diagramContainer.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   });
+  var readerView;
   function readerPage(name) {
+    readerView = name;
     reader.hidden = false;
     reader.querySelector('.reader-path').textContent = tr("Analysis / ") + name;
     setReaderCollapsed(false);
@@ -295,6 +297,7 @@
     return camera.centerAt(x, y, { scale: camera.state ? camera.state().scale : 1, instant: true });
   }
   function showOverview() {
+    findingReturn = null;
     overviewMode = 'summary'; clearPick();
     readerPage(tr("Overview"));
     root.removeAttribute('data-bauify-source');
@@ -482,7 +485,8 @@
     return (compact ? '' : nextStepHtml(f)) + '<div class="finding ' + esc(f.severity) + '">' + ev + ("<details class=\"technical\">" + "<summary>" + tr("Rule details and alternatives") + "</summary>" + "<b>") + esc(f.code) + '</b> · ' + esc(tr(f.severity)) + (f.id ? ' · ' + esc(f.id) : '') + '<p>' + esc(f.message) + '</p>' + fixes + '</details></div>';
   }
   // Source excerpt for one file:line, from the windows embedded at overlay time.
-  function showCode(file, line, why, tone, full, rangeStart, rangeEnd, match, snapshot, sourcePair, returnFocus) {
+  function showCode(file, line, why, tone, full, rangeStart, rangeEnd, match, snapshot, sourcePair, returnFocus, returnPage) {
+    var sourceParent = returnPage || (sourcePair ? tr("Files") : readerView || tr("Component"));
     readerPage(tr("Source"));
     function captured(sources, sourceFile) {
       return sourceFile && Object.hasOwn(sources || {}, sourceFile) ? sources[sourceFile] : null;
@@ -491,7 +495,6 @@
     var before = pr && (sourcePair ? sourcePair.base : file), after = sourcePair ? sourcePair.head : file;
     var snip = snapshot === 'base' ? captured(pr && pr.beforeSources, file) : captured(data.snippets, file);
     line = Number.isInteger(line) && line > 0 ? line : null;
-    var sourceParent = sourcePair ? tr("Files") : detail.hidden ? tr("Component") : tr("Problem");
     var h = ("<div class=\"grip\">" + "<button class=\"close\" aria-label=\"" + tr("Close") + "\">" + "×" + "</button>" + "<button type=\"button\" class=\"source-back back\">" + "← ") + sourceParent + ("</button>" + "<div class=\"k\">" + tr("Source · ")) + (line ? tr("line ") + line : (full ? tr("full file") : tr("file preview")) + tr(" · no specific finding line")) + '</div><h3>' + esc(file) + '</h3></div>';
     if (pr) h += '<div class="pr-source-sides">' +
       '<button type="button" data-pr-side="base" aria-pressed="' + (snapshot === 'base') + '"' +
@@ -538,12 +541,12 @@
     if (pr) codePane.querySelectorAll('[data-pr-side]').forEach(function (button) {
       button.addEventListener('click', function () {
         var target = button.dataset.prSide;
-        showCode(target === 'base' ? before : after, null, why, tone, full, null, null, null, target, sourcePair, returnFocus);
+        showCode(target === 'base' ? before : after, null, why, tone, full, null, null, null, target, sourcePair, returnFocus, sourceParent);
         if (sourcePair) codePane.querySelector('[data-pr-side="' + target + '"]').focus();
       });
     });
     var sourceToggle = codePane.querySelector('.source-toggle');
-    if (sourceToggle) sourceToggle.addEventListener('click', function () { showCode(file, line, why, tone, !full, rangeStart, rangeEnd, match, snapshot, sourcePair, returnFocus); });
+    if (sourceToggle) sourceToggle.addEventListener('click', function () { showCode(file, line, why, tone, !full, rangeStart, rangeEnd, match, snapshot, sourcePair, returnFocus, sourceParent); });
     var backToSourceParent = function () {
       codePane.hidden = true;
       document.documentElement.removeAttribute('data-bauify-source');
@@ -555,13 +558,13 @@
     };
     codePane.querySelector('.close').addEventListener('click', backToSourceParent);
     codePane.querySelector('.source-back').addEventListener('click', backToSourceParent);
-    codePane.onkeydown = sourcePair ? function (event) {
+    codePane.onkeydown = sourcePair || returnFocus ? function (event) {
       if (event.key !== 'Escape') return;
       event.preventDefault();
       event.stopPropagation();
       backToSourceParent();
     } : null;
-    if (sourcePair) codePane.querySelector('.source-back').focus();
+    if (sourcePair || returnFocus) codePane.querySelector('.source-back').focus();
     var hit = codePane.querySelector('.ln.hit');
     if (hit) codePane.scrollTop = Math.max(0, hit.offsetTop - codePane.offsetTop - codePane.clientHeight / 2);
   }
@@ -596,7 +599,7 @@
       el.addEventListener('click', function () {
         detail.querySelectorAll('.ref.active').forEach(function (x) { x.classList.remove('active'); }); el.classList.add('active');
         var match = el.getAttribute('data-match');
-        showCode(el.getAttribute('data-file'), parseInt(el.getAttribute('data-line'), 10), el.getAttribute('data-why'), el.getAttribute('data-tone'), false, Number(el.getAttribute('data-range-start')), Number(el.getAttribute('data-range-end')), match ? JSON.parse(match) : null);
+        showCode(el.getAttribute('data-file'), parseInt(el.getAttribute('data-line'), 10), el.getAttribute('data-why'), el.getAttribute('data-tone'), false, Number(el.getAttribute('data-range-start')), Number(el.getAttribute('data-range-end')), match ? JSON.parse(match) : null, null, null, function () { el.focus({ preventScroll: true }); });
       });
     });
   }
@@ -1030,9 +1033,15 @@
     var locations = captured ? captured.task.locations.filter(function (l) { return l.startLine; }).slice(0, 2) : [];
     if (!locations.length && f.subject && f.subject.file && f.subject.line) locations = [{ file: f.subject.file, startLine: f.subject.line, endLine: f.subject.endLine }];
     if (!locations.length) locations = (f.evidence && f.evidence.imports || []).slice(0, 2).map(function (v) { return { file: v.file, startLine: v.line, endLine: v.line }; });
+    if (!locations.length) {
+      var file = f.subject && f.subject.file;
+      var sourceNotice = '<p class="ev">' + esc(tr("No line-level source evidence was recorded for this finding.")) + '</p>';
+      return sourceNotice + (file && Object.hasOwn(data.snippets || {}, file) ? '<p>' + fileLink(file) + '</p>' : '');
+    }
     return locations.map(function (loc) {
       var snip = (data.snippets || {})[loc.file], focus = f.code === 'complexity/function' ? f.evidence.deepestLine || loc.startLine : loc.startLine;
       var h = '<div class="inline-evidence">' + ref(loc.file, focus, '', tr("Captured source evidence. Read the complete context before editing."), toneOf(f.severity), loc.startLine, loc.endLine);
+      if (focus !== loc.startLine) h += '<p class="ev">' + esc(tr("The excerpt highlights line {line}, where nesting is deepest. The function starts at line {start}.", { line: focus, start: loc.startLine })) + '</p>';
       if (!snip) return h + ("<div class=\"ev\">" + tr("Source unavailable in this report. Open the file in your editor or re-analyze.") + "</div>" + "</div>");
       var start = Math.max(0, focus - 5), end = Math.min(snip.lines.length, start + 9);
       h += ("<pre aria-label=\"" + tr("Code excerpt from ") + "") + esc(loc.file) + '">';
@@ -1171,8 +1180,9 @@
       });
     });
   }
-  function showFinding(id, parent) {
+  function showFinding(id, parent, atlasReturn) {
     var f = findingById[id]; if (!f) return;
+    if (atlasReturn && (!findingReturn || findingReturn.parent === 'atlas')) findingReturn = { parent: 'atlas', restore: atlasReturn };
     parent = findingReturn ? findingReturn.parent : parent || (!overview.hidden && overviewMode === 'findings' ? 'findings' : 'summary');
     if (standalone && !findingReturn) {
       var opener = document.activeElement;
@@ -1186,8 +1196,8 @@
     var scope = findingScope(f), path = findingLocation(f);
     var locationHtml = path ? '<p class="finding-location">' + esc(path) + '</p>' : '';
     setFocus(f.componentIds || []);
-    if (standalone && window.__archifyAtlas) window.__archifyAtlas.focusFinding(id);
-    var h = ("<button class=\"close\" aria-label=\"" + tr("Close") + "\">" + "×" + "</button>" + "<button class=\"back\" type=\"button\">" + "← ") + (parent === 'findings' ? tr("Findings") : tr("Overview")) + '</button>';
+    if (standalone && !atlasReturn && window.__archifyAtlas) window.__archifyAtlas.focusFinding(id);
+    var h = ("<button class=\"close\" aria-label=\"" + tr("Close") + "\">" + "×" + "</button>" + "<button class=\"back\" type=\"button\">" + "← ") + (parent === 'atlas' ? tr("Atlas") : parent === 'findings' ? tr("Findings") : tr("Overview")) + '</button>';
     if (f.external) {
       h += '<div class="external-origin"><span>' + esc(f.external.tool) + '</span><code>' + esc(f.external.ruleId || tr("review comment")) + '</code><span class="finding-level ' + tone + '">' + esc(tr(f.severity)) + '</span></div><h3>' + esc(findingTitle(f)) + '</h3>';
       if (f.message !== findingTitle(f)) h += '<div class="external-message">' + esc(f.message) + '</div>';
@@ -1218,8 +1228,8 @@
     detail.hidden = false;
     codePane.hidden = true;
     detail.scrollTop = 0;
-    detail.querySelector('.close').addEventListener('click', standalone ? leaveFinding : showOverview);
-    detail.querySelector('.back').addEventListener('click', standalone ? leaveFinding : function () { if (parent === 'findings') showFindings(); else showOverview(); });
+    detail.querySelector('.close').addEventListener('click', standalone || parent === 'atlas' ? leaveFinding : showOverview);
+    detail.querySelector('.back').addEventListener('click', standalone || parent === 'atlas' ? leaveFinding : function () { if (parent === 'findings') showFindings(); else showOverview(); });
     var locate = detail.querySelector('.locate');
     if (locate) locate.addEventListener('click', function () { locateComponents(f.componentIds, true); });
     detail.querySelectorAll('[data-finding]').forEach(function (el) { el.addEventListener('click', function () { showFinding(el.getAttribute('data-finding')); }); });
@@ -1232,6 +1242,10 @@
     var previous = findingReturn;
     findingReturn = null;
     if (previous && previous.parent === 'findings') showFindings(); else showOverview();
+    if (previous?.restore) {
+      previous.restore();
+      return;
+    }
     if (previous && previous.atlas && window.__archifyAtlas) window.__archifyAtlas.restoreSelection(previous.atlas);
     if (previous && previous.opener) {
       var replacement = Array.from(overview.querySelectorAll('[data-finding]')).find(function (row) { return row.getAttribute('data-finding') === previous.opener && row.getClientRects().length; });
@@ -1254,7 +1268,8 @@
     var link = event.target.closest && event.target.closest('.source-file');
     if (!link || (!panel.contains(link) && !detail.contains(link))) return;
     event.preventDefault();
-    showCode(link.getAttribute('data-file'), Number(link.getAttribute('data-line')) || null, '', '');
+    showCode(link.getAttribute('data-file'), Number(link.getAttribute('data-line')) || null, '', '', false, null, null, null, null, null,
+      function () { link.focus({ preventScroll: true }); });
   });
   function sourceLinks(c, file) {
     var lines = [];
@@ -1618,7 +1633,16 @@
   }
   function flyClose(back) { return '<button class="close" aria-label="' + esc(tr("Close")) + '">×</button><button type="button" class="back">← ' + esc(back) + '</button>'; }
   // A dependency between two components: whether the diagram draws it, and the imports behind it.
+  function flySourceLocation(file, line, metadata, target) {
+    var content = '<span>' + esc(file) + '</span><em>' + esc(metadata) + '</em>';
+    if (target) content += '<small>→ ' + esc(target) + '</small>';
+    if (!Object.hasOwn(data.snippets || {}, file)) {
+      return '<div class="fly-ev fly-ev-unavailable">' + content + '<small>' + esc(tr('Source was not captured')) + '</small></div>';
+    }
+    return '<button type="button" class="fly-ev" data-file="' + esc(file) + '" data-line="' + (line || '') + '">' + content + '</button>';
+  }
   function showEdge(from, to) {
+    findingReturn = null;
     var e = codeEdgeByKey[from + '>' + to], undrawn = !!e && e.declared === false;
     readerPage(tr('Dependency')); root.removeAttribute('data-bauify-source');
     overview.hidden = true; detail.hidden = true; codePane.hidden = true; setFocus([]);
@@ -1631,13 +1655,14 @@
       h += '<div class="fly-nums two"><div><b>' + fmt(e.weight) + '</b><span>' + esc(tr('imports')) + '</span></div><div><b>' + Object.keys(files).length + (e.evidence.length < e.weight ? '+' : '') + '</b><span>' + esc(tr('source files')) + '</span></div></div>';
       h += '<p class="fly-note' + (undrawn ? ' attention' : '') + '">' + esc(undrawn ? tr('{from} imports {to} in the code, but the diagram draws no line between them. Add it to the diagram, or treat it as coupling that should not exist.', { from: compLabel(from), to: compLabel(to) }) : tr('The diagram draws this dependency and the code confirms it.')) + '</p>';
       h += '<h4 class="fly-h">' + esc(tr('Which files cause it')) + '<small>' + esc(e.evidence.length < e.weight ? tr('first {count}', { count: e.evidence.length }) : tr('all')) + '</small></h4>';
-      h += e.evidence.map(function (v) { return '<button type="button" class="fly-ev" data-file="' + esc(v.file) + '" data-line="' + (v.line || '') + '"><span>' + esc(v.file) + '</span><em>:' + (v.line || '?') + '</em><small>→ ' + esc(v.to) + '</small></button>'; }).join('');
+      h += e.evidence.map(function (v) { return flySourceLocation(v.file, v.line, ':' + (v.line || '?'), v.to); }).join('');
       h += '<div class="fly-acts"><button type="button" class="fly-copy">' + esc(tr('Copy for AI')) + '</button></div><p class="fly-status ev" role="status" aria-live="polite"></p>';
     } else h += '<p class="fly-note">' + esc(tr('The diagram draws this relationship, but no import between these components was found. It may come from configuration, runtime calls or an external system, or the diagram over-states it.')) + '</p>';
     panel.innerHTML = h; panel.hidden = false; panel.scrollTop = 0;
     panel.querySelector('.close').addEventListener('click', showOverview);
     panel.querySelector('.back').addEventListener('click', function () { if (byId[from]) show(from); else showOverview(); });
-    panel.querySelectorAll('.fly-ev').forEach(function (el) { el.addEventListener('click', function () { showCode(el.getAttribute('data-file'), parseInt(el.getAttribute('data-line'), 10), tr('Import from {from} to {to}.', { from: compLabel(from), to: compLabel(to) }), undrawn ? 'red' : 'info'); }); });
+    panel.querySelectorAll('button.fly-ev').forEach(function (el) { el.addEventListener('click', function () { showCode(el.getAttribute('data-file'), parseInt(el.getAttribute('data-line'), 10), tr('Import from {from} to {to}.', { from: compLabel(from), to: compLabel(to) }), undrawn ? 'red' : 'info',
+      false, null, null, null, null, null, function () { el.focus({ preventScroll: true }); }); }); });
     var copy = panel.querySelector('.fly-copy');
     if (copy) copy.addEventListener('click', function () {
       var text = tr('{from} → {to}: {count} imports in the code', { from: compLabel(from), to: compLabel(to), count: e.weight }) + (undrawn ? tr(', not drawn on the architecture diagram') : '') + '.\n' + e.evidence.map(function (v) { return '- ' + v.file + ':' + (v.line || '?') + ' → ' + v.to; }).join('\n');
@@ -1658,12 +1683,13 @@
     h += '<div class="fly-nums"><div><b>' + fmt(m.files) + '</b><span>' + esc(tr('files')) + '</span></div><div><b>' + fmtK(m.loc) + '</b><span>' + esc(tr('lines')) + '</span></div><div><b>' + fmt(fs.length) + '</b><span>' + esc(tr('findings')) + '</span></div></div>';
     h += '<p class="fly-note">' + esc(tr('This code is in the repository, but no component on the architecture diagram owns it. If it is part of the product, the diagram needs a node for it; if it is tooling, it can be left out of the analysis.')) + '</p>';
     if (fs.length) h += '<h4 class="fly-h">' + esc(tr('Look at these first')) + '<small>' + esc(tr('by severity and complexity')) + '</small></h4>' + fs.slice().sort(function (a, b) { return sevRank(a) - sevRank(b) || complexityOf(b) - complexityOf(a); }).slice(0, 5).map(flyFinding).join('');
-    if (files.length) h += '<h4 class="fly-h">' + esc(tr('Largest files')) + '<small>' + esc(plural(files.length, 'file')) + '</small></h4>' + files.slice(0, 5).map(function (f) { return '<button type="button" class="fly-ev" data-file="' + esc(f.path) + '"><span>' + esc(f.path) + '</span><em>' + esc(plural(f.loc || 0, 'line')) + '</em></button>'; }).join('');
+    if (files.length) h += '<h4 class="fly-h">' + esc(tr('Largest files')) + '<small>' + esc(plural(files.length, 'file')) + '</small></h4>' + files.slice(0, 5).map(function (f) { return flySourceLocation(f.path, null, plural(f.loc || 0, 'line')); }).join('');
     panel.innerHTML = h; panel.hidden = false; panel.scrollTop = 0;
     panel.querySelector('.close').addEventListener('click', showOverview);
     panel.querySelector('.back').addEventListener('click', showOverview);
     wireFlyRows(panel);
-    panel.querySelectorAll('.fly-ev').forEach(function (el) { el.addEventListener('click', function () { showCode(el.getAttribute('data-file'), null, '', 'info'); }); });
+    panel.querySelectorAll('button.fly-ev').forEach(function (el) { el.addEventListener('click', function () { showCode(el.getAttribute('data-file'), null, '', 'info',
+      false, null, null, null, null, null, function () { el.focus({ preventScroll: true }); }); }); });
   }
   if (flyMode) {
     var flyFrame = 0;
@@ -1701,10 +1727,10 @@
     setOn(true);
     showCode(file, line, tr('Captured PR source; inspect changes against the merge-base.'), 'info', false, null, null, null, snapshot, sourcePair, returnFocus);
   };
-  window.__archifyShowFinding = function (id, parent) {
+  window.__archifyShowFinding = function (id, parent, atlasReturn) {
     if (!findingById[id]) return;
     if (root.getAttribute('data-bauify') !== 'on') setOn(true);
-    showFinding(id, parent);
+    showFinding(id, parent, atlasReturn);
   };
   document.addEventListener('keydown', function (e) {
     if (standalone) return;
