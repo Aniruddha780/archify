@@ -24,6 +24,8 @@ Findings accepted in --baseline do not fail the run unless their evidence change
 since they were accepted. --new-only fails only on
 findings that are new since --compare (or since the previous run in --out);
 without a previous run to compare with, every open finding counts as new.
+Missing TypeScript project configurations prevent the gate from passing;
+--fail-on never can still produce an incomplete report for inspection.
 --update-baseline writes every current finding to --baseline (keeping existing
 reasons; new entries get --reason) and exits 0.
 --accept accepts one current finding with a required --reason. --revoke removes
@@ -103,6 +105,7 @@ export async function runCheck(argv) {
   const previous = loadPrevious(previousFile, { strict: Boolean(options['--compare']) });
 
   const { facts, config, otherLanguages } = extractFacts(root, { language: options['--language'] || null, config: options['--config'] || null });
+  const unavailableProjects = facts.languageScope?.unavailableProjects || [];
   const graph = buildGraph(facts, config);
   const findings = evaluateGraph(graph, config, facts, { root });
   if (options['--accept']) {
@@ -113,6 +116,10 @@ export async function runCheck(argv) {
   }
 
   if (options['--update-baseline']) {
+    if (unavailableProjects.length) fail('baseline/project-coverage-incomplete', 'Cannot replace the baseline while TypeScript projects are unavailable.', {
+      evidence: { projects: unavailableProjects },
+      supportedFixes: ['restore the project configuration dependencies, then rebuild the baseline'],
+    });
     if (findings.analysis?.external?.length && !options['--reason']?.trim()) fail('baseline/reason-required', 'Accepting external diagnostics requires an explicit reason.', { supportedFixes: ['provide --reason explaining the review decision'] });
     const existing = baselineFile && fs.existsSync(baselineFile) ? loadBaseline(baselineFile) : null;
     const doc = baselineFrom(findings.diagnostics, { existing, reason: options['--reason'] || 'Accepted as existing when the baseline was written; review before relying on it.' });
@@ -145,9 +152,12 @@ export async function runCheck(argv) {
     // Without a comparison nothing can be shown to be old, so every open
     // finding counts as new: a missing artifact must not pass the gate.
     && (!newOnly || !review.comparison || review.findings[d.id]?.since === 'new'));
-  const status = failing.length ? 'failed' : 'ok';
+  const previousIncomplete = newOnly && previous?.analysis?.coverage?.unavailableTypeScriptFiles;
+  const incomplete = Boolean(unavailableProjects.length || previousIncomplete);
+  const blocked = incomplete && failOn !== 'never';
+  const status = incomplete ? 'incomplete' : failing.length ? 'failed' : 'ok';
   return {
-    exitCode: failing.length ? 1 : 0,
+    exitCode: blocked ? 2 : failing.length ? 1 : 0,
     receipt: receipt(status, {
       command: 'check', root, out,
       language: facts.repository.language, files: facts.files.length, rules: findings.rules,
@@ -169,10 +179,11 @@ export async function runCheck(argv) {
           })),
         },
       } : {}),
-      gate: { failOn, newOnly, ...(newOnly && !review.comparison ? { note: 'no previous run to compare with: every open finding counts as new' } : {}),
+      gate: { failOn, newOnly, ...(blocked ? { blocked: 'typescript-project-coverage-incomplete' } : {}),
+        ...(newOnly && !review.comparison ? { note: 'no previous run to compare with: every open finding counts as new' } : {}),
         // A first run, or a run after a rule became stricter, fails on findings that
         // already existed. Without a baseline, say how to record them once.
-        ...(failing.length && !baselineFile ? { adopt: baselineCommand(CLI, root, { language: options['--language'] || null, config: options['--config'] || null }) } : {}), failing: failing.map((d) => ({ id: d.id, code: d.code, severity: d.severity, where: findingWhere(d), message: d.message })) },
+        ...(failing.length && !baselineFile && !blocked ? { adopt: baselineCommand(CLI, root, { language: options['--language'] || null, config: options['--config'] || null }) } : {}), failing: failing.map((d) => ({ id: d.id, code: d.code, severity: d.severity, where: findingWhere(d), message: d.message })) },
       review: reviewSummary(review),
       comparisonReasons: review.comparison ? review.comparison.reasons : [],
       staleBaseline: review.baseline ? review.baseline.stale : [],
@@ -198,9 +209,10 @@ export async function runCheck(argv) {
       // without opening the output directory. The gate below does not read it.
       coverage: {
         parseErrors: overview.coverage.files.parseErrors,
-        ...(overview.coverage.files.parseErrors.length || overview.coverage.files.excludedByRole ? {
+        ...(overview.coverage.files.parseErrors.length || overview.coverage.files.excludedByRole || unavailableProjects.length ? {
           analyzedFiles: overview.coverage.files.analyzed,
         } : {}),
+        ...(unavailableProjects.length ? { unavailableTypeScriptFiles: overview.coverage.files.unavailableTypeScriptFiles } : {}),
         ...(overview.coverage.files.excludedByRole ? {
           excludedByRole: overview.coverage.files.excludedByRole,
           excludedRoleCounts: countExcludedRoles(facts.files, graph.excluded?.roles),
@@ -250,7 +262,7 @@ export function formatText(r) {
   ].map(formatTerminalText).join('\n');
   const lines = [];
   const c = r.counts;
-  lines.push(`Code analysis: ${r.verdict} — ${c.findings} finding${c.findings === 1 ? '' : 's'} (${c.error} error, ${c.warning} warning, ${c.info} info open; ${c.accepted} accepted)`);
+  lines.push(`Code analysis: ${r.status === 'incomplete' ? r.status : r.verdict} — ${c.findings} finding${c.findings === 1 ? '' : 's'} (${c.error} error, ${c.warning} warning, ${c.info} info open; ${c.accepted} accepted)`);
   if (c.acceptedErrors) lines.push(`  ${c.acceptedErrors} accepted error${c.acceptedErrors === 1 ? ' is' : 's are'} still present: the baseline keeps ${c.acceptedErrors === 1 ? 'it' : 'them'} from failing this run, the finding${c.acceptedErrors === 1 ? '' : 's'} remain${c.acceptedErrors === 1 ? 's' : ''}.`);
   lines.push(`  ${({ py: 'Python', ts: 'JS/TS', java: 'Java', go: 'Go', rust: 'Rust', c: 'C', cpp: 'C++' })[r.language] || r.language} · ${r.files} files · rules: ${r.rules.join(', ')}`);
   if (['c', 'cpp'].includes(r.coverage?.languageScope?.language)) {
@@ -278,6 +290,15 @@ export function formatText(r) {
     lines.push(uncovered.excludedByRole ? `${scope}, ${uncovered.excludedByRole} excluded by role${breakdown ? ` (${breakdown})` : ''}` : scope);
   }
   if (uncovered.parseErrors.length) lines.push(`  Not analyzed, parse failed: ${uncovered.parseErrors.join(', ')}`);
+  if (uncovered.unavailableTypeScriptFiles) {
+    lines.push(`  TypeScript project coverage incomplete: ${uncovered.unavailableTypeScriptFiles} selected source files omitted.`);
+    for (const { config, missingExtends } of uncovered.languageScope.unavailableProjects) {
+      lines.push(`    ${config} requires ${missingExtends.join(', ')}`);
+    }
+  }
+  if (r.gate.blocked) lines.push(uncovered.unavailableTypeScriptFiles
+    ? '  Gate blocked by incomplete TypeScript project coverage. Restore the configuration dependencies, or use --fail-on never to inspect the partial report.'
+    : '  Gate blocked because the previous TypeScript run omitted project files. Compare against a complete run or check without --new-only.');
   if (uncovered.otherLanguages.length) lines.push(`  Not analyzed, other language: ${uncovered.otherLanguages.map((l) => `${l.files} ${l.adapter}`).join(', ')}`);
   for (const source of uncovered.external || []) {
     const coverage = source.coverage.complete === true ? 'complete' : source.coverage.complete === false ? 'incomplete' : 'unknown';
@@ -329,7 +350,7 @@ export function formatText(r) {
       lines.push(formatTerminalCommand(r.gate.adopt, 'gate.adopt'));
       lines.push('  Then pass --baseline analysis-baseline.json on every run. Accepted errors stay listed as still to fix.');
     }
-  } else lines.push(`PASSED: no open finding at or above ${r.gate.failOn}${r.gate.newOnly ? ' among new findings' : ''}.`);
+  } else if (r.status !== 'incomplete') lines.push(`PASSED: no open finding at or above ${r.gate.failOn}${r.gate.newOnly ? ' among new findings' : ''}.`);
   return lines.map(formatTerminalText).join('\n');
 }
 
