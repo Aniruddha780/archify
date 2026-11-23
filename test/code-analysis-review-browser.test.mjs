@@ -25,6 +25,7 @@ test('Code Analysis marks baseline findings, re-analyzes without a restart, and 
   // Then a new cycle appears.
   write('c.mjs', "import './d.mjs';\n");
   write('d.mjs', "import './c.mjs';\n");
+  write('scratch.mjs', 'export const scratch = 1;\n');
 
   const ir = path.join(scratch, 'input.json');
   fs.writeFileSync(ir, JSON.stringify({ schema_version: 1, diagram_type: 'architecture', meta: { title: 'Review browser regression', output: 'architecture.html' },
@@ -98,6 +99,63 @@ test('Code Analysis marks baseline findings, re-analyzes without a restart, and 
     const shot = await send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(process.env.ARCHIFY_ANALYSIS_REVIEW_AFTER_SCREENSHOT, Buffer.from(shot.data, 'base64'));
   }
+
+  const refreshFromCurrentFocus = async () => {
+    // Exercise the pointer focus hand-off in one browser turn. Hit testing is
+    // covered separately against the real desktop report.
+    const initialPage = await run(`(() => {
+      const button = document.getElementById('analysis-refresh');
+      const original = performance.timeOrigin;
+      button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+      return original;
+    })()`);
+    const finished = `performance.timeOrigin !== ${initialPage} && document.documentElement.getAttribute('data-bauify') === 'on' && !history.state`;
+    try {
+      await wait(`(${finished}) || document.querySelector('.analysis-refresh-status.reanalyze-error')`);
+    } catch (error) {
+      const state = await run(`({
+        reloaded: performance.timeOrigin !== ${initialPage},
+        pending: document.querySelector('#analysis-refresh')?.getAttribute('aria-busy'),
+        notices: [...document.querySelectorAll('[role=status]')].map(node => node.textContent).filter(Boolean),
+      })`);
+      throw new Error(error.message + ': ' + JSON.stringify(state));
+    }
+    assert.equal(await run(finished), true, await run("document.querySelector('.analysis-refresh-status')?.textContent"));
+  };
+
+  await run("document.querySelector('g[data-node-id=app]').dispatchEvent(new MouseEvent('click',{bubbles:true})); document.querySelector('#bauify-panel .back').focus()");
+  await refreshFromCurrentFocus();
+  assert.match(await run("document.querySelector('#bauify-panel h3').textContent"), /^App/);
+  assert.equal(await run("document.activeElement.matches('#bauify-panel .back')"), true);
+
+  const beforeFinding = await run(`(() => {
+    const finding = JSON.parse(document.getElementById('bauify-analysis').textContent).findings[0];
+    window.__archifyShowFinding(finding.id);
+    document.querySelector('#bauify-detail .back').focus();
+    return { title: document.querySelector('#bauify-detail h3').textContent, id: finding.id };
+  })()`);
+  await refreshFromCurrentFocus();
+  assert.equal(await run("document.querySelector('#bauify-detail .ai-task').dataset.taskId"), beforeFinding.id);
+  assert.equal(await run("document.querySelector('#bauify-detail h3').textContent"), beforeFinding.title);
+  assert.equal(await run("document.activeElement.matches('#bauify-detail .back')"), true);
+
+  await run(`document.querySelector('.views-option[data-view=atlas]').click();
+    document.getElementById('atlas-tab-files').click();
+    const fileSearch = document.querySelector('.atlas-file-query');
+    fileSearch.value = 'scratch.mjs'; fileSearch.dispatchEvent(new Event('input'));
+    document.querySelector('.atlas-file-list button').click()`);
+  await refreshFromCurrentFocus();
+  assert.equal(await run("document.getElementById('atlas-tab-files').getAttribute('aria-selected')"), 'true');
+  assert.equal(await run("document.querySelector('.atlas-file-query').value"), 'scratch.mjs');
+  assert.equal(await run("document.activeElement.matches('.atlas-file-list button') && document.activeElement.textContent"), 'scratch.mjs');
+  assert.equal(await run("document.activeElement.getAttribute('aria-current')"), 'true');
+  fs.unlinkSync(path.join(root, 'scratch.mjs'));
+  await refreshFromCurrentFocus();
+  assert.equal(await run("document.querySelector('.atlas-file-query').value"), 'scratch.mjs');
+  assert.equal(await run("document.activeElement.matches('.atlas-file-query')"), true);
+  assert.match(await run("document.querySelector('.analysis-refresh-status').textContent"), /selection is no longer available/);
+  await run("document.querySelector('.views-option[data-view=diagram]').click(); window.__archifyShowFinding(" + JSON.stringify(beforeFinding.id) + "); document.querySelector('#bauify-detail .back').click()");
 
   // A failing run keeps the last good result on disk and on the page.
   const before = fs.readFileSync(path.join(out, 'analysis', 'findings.json'), 'utf8');
